@@ -1,60 +1,59 @@
 import streamlit as st
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_ollama import OllamaLLM
+from langchain_groq import ChatGroq # NEW: Use Groq instead of Ollama
 from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate  # <--- Make sure this is imported
+from langchain.prompts import PromptTemplate
 
+# 1. Page Config
+st.set_page_config(page_title="Department AI Advisor", page_icon="🎓")
 st.title("🎓 Department AI Advisor")
 
+# 2. Setup Memory (Chat History)
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# 3. Load Resources (Optimized for Cloud)
 @st.cache_resource
 def load_resources():
+    # We use the same embeddings so the 'chroma_db' still works!
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     db = Chroma(persist_directory="./chroma_db", embedding_function=embeddings)
-    llm = OllamaLLM(model="llama3.2:1b")
+    
+    # Use Groq API instead of local Ollama
+    # API key should be stored in .streamlit/secrets.toml
+    try:
+        api_key = st.secrets["GROQ_API_KEY"]
+    except (FileNotFoundError, KeyError):
+        api_key = "your_actual_api_key_here" 
+    llm = ChatGroq(api_key=api_key, model_name="llama-3.1-8b-instant")
     return db, llm
 
 db, llm = load_resources()
 
-# --- NEW ADDITION START ---
-# "Less strict" prompt for the 1B model (it gets scared easily!)
-template = """You are a helpful assistant.
-Read the following text text and answer the question.
-
-Context:
-{context}
-
+# 4. Define the Chain (Same logic as before)
+template = """You are a helpful University Advisor. Use the handbook context to answer.
+Context: {context}
 Question: {question}
-
 Answer:"""
 
-QA_CHAIN_PROMPT = PromptTemplate(
-    input_variables=["context", "question"],
-    template=template,
-)
-# --- NEW ADDITION END ---
-
-# Update your chain to use the prompt
-retriever = db.as_retriever(search_kwargs={"k": 2}) # Reduced to 2 for better focus
+QA_CHAIN_PROMPT = PromptTemplate.from_template(template)
 qa_chain = RetrievalQA.from_chain_type(
     llm=llm,
-    retriever=retriever,
-    chain_type_kwargs={"prompt": QA_CHAIN_PROMPT} # <--- Add this!
+    retriever=db.as_retriever(search_kwargs={"k": 3}),
+    chain_type_kwargs={"prompt": QA_CHAIN_PROMPT}
 )
 
-query = st.text_input("Enter your question here:")
+# 5. The Chat Interface
+for msg in st.session_state.messages:
+    st.chat_message(msg["role"]).write(msg["content"])
 
-if query:
-    with st.spinner("Searching..."):
-        # This will now use your new strict rules
-        response = qa_chain.invoke(query)
-        st.markdown("### 🤖 Advisor Answer:")
-        st.success(response["result"])
+if prompt := st.chat_input("Ask me about the handbook:"):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    st.chat_message("user").write(prompt)
 
-        st.markdown("---")
-        # Keep debug accessible but tucked away
-        with st.expander("�️ Debug: See what I read from the Handbook"):
-            docs = db.similarity_search(query, k=2)
-            for i, d in enumerate(docs):
-                st.markdown(f"**Chunk {i+1}** (from page {d.metadata.get('page', '?')}):")
-                st.info(d.page_content)
+    with st.chat_message("assistant"):
+        response = qa_chain.invoke(prompt)
+        answer = response["result"]
+        st.write(answer)
+        st.session_state.messages.append({"role": "assistant", "content": answer})
