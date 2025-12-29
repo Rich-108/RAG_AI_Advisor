@@ -1,58 +1,79 @@
+
 import streamlit as st
+import os
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
-from langchain.chains import RetrievalQA # Fixes the ModuleNotFoundError
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
 
-st.set_page_config(page_title="Department AI Advisor")
-st.title("🎓 Department AI Advisor")
+# --- 1. PAGE CONFIG (MUST BE THE FIRST ST COMMAND) ---
+st.set_page_config(page_title="Department AI Advisor", layout="centered")
 
-# 1. Load Resources (with Error Handling)
+# --- 2. THE VISIBLE TITLE ---
+st.title("🎓 Acadamic Insight Engine")
+st.markdown("---")
+
+# --- 3. PATH LOGIC FOR HUGGING FACE ---
+current_dir = os.path.dirname(os.path.abspath(__file__))
+db_path = os.path.join(current_dir, "chroma_db")
+
+# --- 4. RESOURCE LOADING ---
 @st.cache_resource
-def load_resources():
+def load_rag_system():
     try:
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        db = Chroma(persist_directory="./chroma_db", embedding_function=embeddings)
+        # Initialize Chroma with the absolute path
+        db = Chroma(persist_directory=db_path, embedding_function=embeddings)
         
-        # Pull API key from Secrets (Hugging Face / Streamlit Cloud)
         api_key = st.secrets["GROQ_API_KEY"]
-        llm = ChatGroq(api_key=api_key, model_name="llama-3.1-8b-instant")
+        llm = ChatGroq(api_key=api_key, model_name="llama-3.1-8b-instant", temperature=0)
         
         return db, llm
     except Exception as e:
-        st.error(f"Error loading resources: {e}")
+        st.error(f"Initialization Error: {e}")
         return None, None
 
-db, llm = load_resources()
+db, llm = load_rag_system()
 
+# --- 5. RAG LOGIC & CHAT ---
 if db and llm:
-    # 2. Chain Logic
-    template = """You are a helpful University Advisor. Answer based ONLY on the context.
+    # Strict prompt to stop the "Cake Recipe" problem
+    prompt = ChatPromptTemplate.from_template("""
+    You are a University Advisor. Answer ONLY using the context below.
+    If the answer isn't there, say: "I am sorry, but that is not in the handbook."
+    
     Context: {context}
     Question: {question}
-    Answer:"""
-    
-    QA_CHAIN_PROMPT = PromptTemplate.from_template(template)
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        retriever=db.as_retriever(search_kwargs={"k": 2}),
-        chain_type_kwargs={"prompt": QA_CHAIN_PROMPT}
+    Answer:""")
+
+    def format_docs(docs):
+        return "\n\n".join(doc.page_content for doc in docs)
+
+    retriever = db.as_retriever(search_kwargs={"k": 3})
+    rag_chain = (
+        {"context": retriever | format_docs, "question": RunnablePassthrough()}
+        | prompt
+        | llm
+        | StrOutputParser()
     )
 
-    # 3. Chat Interface
+    # Chat Interface Logic...
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
     for msg in st.session_state.messages:
-        st.chat_message(msg["role"]).write(msg["content"])
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-    if prompt := st.chat_input("Ask about the handbook:"):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        st.chat_message("user").write(prompt)
+    if user_input := st.chat_input("Ask me about the handbook..."):
+        st.session_state.messages.append({"role": "user", "content": user_input})
+        with st.chat_message("user"):
+            st.markdown(user_input)
 
         with st.chat_message("assistant"):
-            response = qa_chain.invoke(prompt)
-            answer = response["result"]
-            st.write(answer)
-            st.session_state.messages.append({"role": "assistant", "content": answer})
+            # This 'invoke' now uses the RAG data
+            response = rag_chain.invoke(user_input)
+            st.markdown(response)
+            st.session_state.messages.append({"role": "assistant", "content": response})
